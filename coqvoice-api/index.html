@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CoqVoice Real-time Chat</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .chat-container {
+            background-color: #ffffff;
+            border-radius: 1rem; /* rounded-xl */
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); /* shadow-lg */
+            width: 100%;
+            max-width: 768px; /* md:max-w-2xl */
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            min-height: 600px;
+        }
+        .chat-messages {
+            flex-grow: 1;
+            padding: 1.5rem;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        .message-bubble {
+            padding: 0.75rem 1rem;
+            border-radius: 0.75rem; /* rounded-lg */
+            max-width: 80%;
+        }
+        .user-message {
+            background-color: #3b82f6; /* blue-500 */
+            color: white;
+            align-self: flex-end;
+            border-bottom-right-radius: 0.25rem; /* rounded-br-sm */
+        }
+        .ai-message {
+            background-color: #e5e7eb; /* gray-200 */
+            color: #374151; /* gray-700 */
+            align-self: flex-start;
+            border-bottom-left-radius: 0.25rem; /* rounded-bl-sm */
+        }
+        .controls {
+            padding: 1.5rem;
+            border-top: 1px solid #e5e7eb; /* border-gray-200 */
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        .record-button {
+            padding: 0.75rem 1.5rem;
+            border-radius: 9999px; /* rounded-full */
+            font-weight: 600; /* font-semibold */
+            transition: background-color 0.2s ease-in-out;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            cursor: pointer;
+        }
+        .record-button.idle {
+            background-color: #10b981; /* green-500 */
+            color: white;
+        }
+        .record-button.recording {
+            background-color: #ef4444; /* red-500 */
+            color: white;
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+        .status-message {
+            text-align: center;
+            color: #6b7280; /* gray-500 */
+            font-size: 0.875rem; /* text-sm */
+        }
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid #fff;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            display: none; /* Hidden by default */
+        }
+        .record-button.recording .spinner {
+            display: block;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .server-status {
+            font-size: 0.875rem;
+            text-align: center;
+            margin-top: 10px;
+            padding: 5px;
+            border-radius: 0.5rem;
+        }
+        .server-status.connected {
+            background-color: #d1fae5; /* green-100 */
+            color: #065f46; /* green-800 */
+        }
+        .server-status.disconnected {
+            background-color: #fee2e2; /* red-100 */
+            color: #991b1b; /* red-800 */
+        }
+        .server-status.connecting {
+            background-color: #fffbeb; /* yellow-100 */
+            color: #92400e; /* yellow-800 */
+        }
+    </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
+
+    <div class="chat-container">
+        <h1 class="text-3xl font-bold text-center p-6 bg-blue-600 text-white rounded-t-xl">
+            CoqVoice Real-time Chat
+        </h1>
+        <div id="serverStatus" class="server-status connecting">Connecting to server...</div>
+
+        <div id="chatMessages" class="chat-messages">
+            <div class="ai-message message-bubble">
+                Hello! I'm CoqVoice. How can I help you today?
+            </div>
+        </div>
+
+        <div class="controls">
+            <button id="recordButton" class="record-button idle">
+                <span id="recordIcon">🎤</span>
+                <span id="recordText">Start Recording</span>
+                <div class="spinner" id="recordSpinner"></div>
+            </button>
+            <p id="statusMessage" class="status-message">Click to start recording.</p>
+        </div>
+    </div>
+
+    <script>
+        const recordButton = document.getElementById('recordButton');
+        const recordText = document.getElementById('recordText');
+        const recordIcon = document.getElementById('recordIcon');
+        const recordSpinner = document.getElementById('recordSpinner');
+        const statusMessage = document.getElementById('statusMessage');
+        const chatMessages = document.getElementById('chatMessages');
+        const serverStatusDiv = document.getElementById('serverStatus');
+
+        let websocket;
+        let isRecording = false;
+        let audioContext;
+        let audioWorkletNode;
+        let sourceNode;
+        let audioQueue = []; // Buffer for audio chunks before sending
+        const CHUNK_SIZE_MS = 50; // Match server's AUDIO_CHUNK_SIZE_MS
+        const SAMPLE_RATE = 16000; // Match server's TARGET_SAMPLE_RATE
+        const CHUNK_SAMPLES = SAMPLE_RATE * (CHUNK_SIZE_MS / 1000);
+
+        // Configuration for the WebSocket server
+        // IMPORTANT: Replace with your cloud instance's IP address or domain
+        const WS_URL = "ws://YOUR_CLOUD_INSTANCE_IP:8000/ws"; // e.g., "ws://192.168.1.100:8000/ws" or "wss://yourdomain.com/ws"
+
+        // Function to update server status
+        function updateServerStatus(status, message) {
+            serverStatusDiv.className = `server-status ${status}`;
+            serverStatusDiv.textContent = message;
+        }
+
+        // Initialize WebSocket connection
+        function connectWebSocket() {
+            updateServerStatus('connecting', 'Connecting to server...');
+            websocket = new WebSocket(WS_URL);
+
+            websocket.onopen = () => {
+                console.log("WebSocket connected.");
+                updateServerStatus('connected', 'Connected to CoqVoice server.');
+                recordButton.disabled = false; // Enable button once connected
+            };
+
+            websocket.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+                if (data.error) {
+                    console.error("Server error:", data.error);
+                    statusMessage.textContent = `Server error: ${data.error}`;
+                    return;
+                }
+
+                if (data.text) {
+                    addMessageToChat('ai', data.text);
+                }
+
+                if (data.audio_base64) {
+                    const audioBlob = base64ToBlob(data.audio_base64, 'audio/wav');
+                    const audioUrl = URL.createObjectURL(audioBlob);
+                    const audio = new Audio(audioUrl);
+                    audio.play();
+                    audio.onended = () => URL.revokeObjectURL(audioUrl); // Clean up
+                }
+            };
+
+            websocket.onclose = (event) => {
+                console.log("WebSocket disconnected:", event);
+                updateServerStatus('disconnected', 'Disconnected from server. Retrying in 5s...');
+                recordButton.disabled = true; // Disable button on disconnect
+                // Attempt to reconnect after a delay
+                setTimeout(connectWebSocket, 5000);
+            };
+
+            websocket.onerror = (error) => {
+                console.error("WebSocket error:", error);
+                updateServerStatus('disconnected', 'WebSocket error. Retrying in 5s...');
+                recordButton.disabled = true;
+                websocket.close(); // Force close to trigger onclose and reconnect
+            };
+        }
+
+        // Start connection on page load
+        connectWebSocket();
+
+        // Base64 to Blob utility
+        function base64ToBlob(base64, mimeType) {
+            const byteCharacters = atob(base64);
+            const byteNumbers = new Array(byteCharacters.length);
+            for (let i = 0; i < byteCharacters.length; i++) {
+                byteNumbers[i] = byteCharacters.charCodeAt(i);
+            }
+            const byteArray = new Uint8Array(byteNumbers);
+            return new Blob([byteArray], { type: mimeType });
+        }
+
+        // Add message to chat display
+        function addMessageToChat(sender, text) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message-bubble ${sender}-message`;
+            messageDiv.textContent = text;
+            chatMessages.appendChild(messageDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight; // Scroll to bottom
+        }
+
+        // Audio Worklet Processor for sending audio in fixed chunks
+        const audioWorkletCode = `
+            class AudioProcessor extends AudioWorkletProcessor {
+                constructor() {
+                    super();
+                    this.sampleRate = ${SAMPLE_RATE};
+                    this.chunkSizeSamples = ${CHUNK_SAMPLES};
+                    this.audioBuffer = [];
+                }
+
+                process(inputs, outputs, parameters) {
+                    const input = inputs[0]; // First input (microphone)
+                    if (input.length === 0) return true;
+
+                    const inputChannel = input[0]; // Mono audio
+
+                    // Append input audio to buffer
+                    for (let i = 0; i < inputChannel.length; i++) {
+                        this.audioBuffer.push(inputChannel[i]);
+                    }
+
+                    // Send chunks if buffer is large enough
+                    while (this.audioBuffer.length >= this.chunkSizeSamples) {
+                        const chunk = new Float32Array(this.audioBuffer.splice(0, this.chunkSizeSamples));
+                        this.port.postMessage(chunk);
+                    }
+
+                    return true;
+                }
+            }
+            registerProcessor('audio-processor', AudioProcessor);
+        `;
+
+        async function startRecording() {
+            if (isRecording) return;
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE }); // Set context sample rate
+                sourceNode = audioContext.createMediaStreamSource(stream);
+
+                await audioContext.audioWorklet.addModule(URL.createObjectURL(new Blob([audioWorkletCode], { type: 'application/javascript' })));
+                audioWorkletNode = new AudioWorkletNode(audioContext, 'audio-processor');
+
+                audioWorkletNode.port.onmessage = (event) => {
+                    if (websocket && websocket.readyState === WebSocket.OPEN) {
+                        websocket.send(event.data.buffer);
+                    }
+                };
+
+                sourceNode.connect(audioWorkletNode);
+                audioWorkletNode.connect(audioContext.destination); // Connect to speakers to hear yourself (optional)
+
+                isRecording = true;
+                recordButton.classList.remove('idle');
+                recordButton.classList.add('recording');
+                recordText.textContent = 'Recording...';
+                recordIcon.textContent = '🔴';
+                statusMessage.textContent = 'Speak now. Audio is streaming to the model.';
+                recordButton.disabled = false;
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+                statusMessage.textContent = 'Error: Could not access microphone. Please allow access.';
+                recordButton.disabled = true;
+            }
+        }
+
+        function stopRecording() {
+            if (!isRecording) return;
+
+            isRecording = false;
+            if (sourceNode) {
+                sourceNode.disconnect();
+                sourceNode = null;
+            }
+            if (audioWorkletNode) {
+                audioWorkletNode.disconnect();
+                audioWorkletNode = null;
+            }
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+
+            recordButton.classList.remove('recording');
+            recordButton.classList.add('idle');
+            recordText.textContent = 'Start Recording';
+            recordIcon.textContent = '🎤';
+            recordSpinner.style.display = 'none'; // Hide spinner
+            statusMessage.textContent = 'Recording stopped. Click to start again.';
+            recordButton.disabled = false;
+        }
+
+        recordButton.addEventListener('click', () => {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                startRecording();
+            }
+        });
+
+        // Initial state
+        recordButton.disabled = true; // Disable until WebSocket connects
+    </script>
+</body>
+</html>
